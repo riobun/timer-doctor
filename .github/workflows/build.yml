@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  # ── macOS ──────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter build macos --release
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "Timer Doctor" \
+            --volicon "build/macos/Build/Products/Release/timer_doctor.app/Contents/Resources/AppIcon.icns" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 100 \
+            --icon "timer_doctor.app" 180 185 \
+            --hide-extension "timer_doctor.app" \
+            --app-drop-link 480 185 \
+            TimerDoctor.dmg \
+            "build/macos/Build/Products/Release/timer_doctor.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TimerDoctor-macOS
+          path: TimerDoctor.dmg
+
+  # ── Windows ────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter build windows --release
+
+      - name: Package
+        shell: powershell
+        run: |
+          Compress-Archive `
+            -Path "build\windows\x64\runner\Release\*" `
+            -DestinationPath "TimerDoctor-Windows.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TimerDoctor-Windows
+          path: TimerDoctor-Windows.zip
