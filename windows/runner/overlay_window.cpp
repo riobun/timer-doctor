@@ -89,11 +89,11 @@ void OverlayWindow::ApplyLayout() {
 
   const int hPad = 24;
   const int vPad = 10;
-  int h = (textSize.cy > 0 ? textSize.cy : 20) + vPad;
+  int h = ((int)textSize.cy > 0 ? (int)textSize.cy : 20) + vPad;
 
   int screenW = GetSystemMetrics(SM_CXSCREEN);
   int maxW = (int)(screenW * 0.88);
-  int panelW = (std::min)(textSize.cx + hPad, maxW);
+  int panelW = (std::min)((int)textSize.cx + hPad, maxW);
   if (panelW < 60) panelW = 60;
 
   // Keep horizontal position clamped to screen
