@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'timer_service.dart';
 
 const kChannelId = 'timer_doctor_channel';
@@ -23,7 +26,14 @@ class NotificationService {
 
   final _plugin = FlutterLocalNotificationsPlugin();
 
-  Future<void> initialize() async {
+  Future<void> initialize({
+    DidReceiveBackgroundNotificationResponseCallback? backgroundHandler,
+  }) async {
+    if (Platform.isWindows) {
+      await localNotifier.setup(appName: 'Timer Doctor');
+      return;
+    }
+
     const androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
@@ -59,10 +69,32 @@ class NotificationService {
           response.payload,
         );
       },
-      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+      onDidReceiveBackgroundNotificationResponse:
+          backgroundHandler ?? notificationTapBackground,
     );
 
     await _requestPermissions();
+    await _ensureAndroidChannels();
+  }
+
+  /// 确保 Android 通知渠道以最高优先级存在。
+  /// 必须在 initialize() 之后调用，否则 resolvePlatformSpecificImplementation 返回 null。
+  Future<void> _ensureAndroidChannels() async {
+    final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    if (androidImpl == null) return;
+
+    // 删除旧渠道（可能以低优先级缓存），强制重建
+    await androidImpl.deleteNotificationChannel(kChannelId);
+    await androidImpl.createNotificationChannel(
+      const AndroidNotificationChannel(
+        kChannelId,
+        kChannelName,
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+      ),
+    );
   }
 
   Future<void> _requestPermissions() async {
@@ -84,6 +116,28 @@ class NotificationService {
 
   /// Shows the "time's up" notification with 3 action buttons.
   Future<void> showTimerComplete(int snoozeMinutes) async {
+    if (Platform.isWindows) {
+      final notification = LocalNotification(
+        title: '⏰ 时间到！',
+        body: '休息一下，或者继续专注？',
+        actions: [
+          LocalNotificationAction(text: '停止计时'),
+          LocalNotificationAction(text: '立刻开始'),
+          LocalNotificationAction(text: '等 $snoozeMinutes 分钟'),
+        ],
+      );
+      notification.onClickAction = (actionIndex) {
+        final actionId = switch (actionIndex) {
+          0 => kActionStop,
+          1 => kActionStartNow,
+          _ => kActionSnooze,
+        };
+        TimerService.instance.handleNotificationAction(actionId, null);
+      };
+      await notification.show();
+      return;
+    }
+
     final androidDetails = AndroidNotificationDetails(
       kChannelId,
       kChannelName,
@@ -115,6 +169,14 @@ class NotificationService {
 
   /// Simple notification when snooze ends and work timer auto-starts.
   Future<void> showSnoozeEnd() async {
+    if (Platform.isWindows) {
+      await LocalNotification(
+        title: '🎯 开始专注！',
+        body: '休息结束，新一轮专注已开始',
+      ).show();
+      return;
+    }
+
     await _plugin.show(
       2,
       '🎯 开始专注！',
@@ -132,5 +194,8 @@ class NotificationService {
     );
   }
 
-  Future<void> cancelAll() => _plugin.cancelAll();
+  Future<void> cancelAll() async {
+    if (Platform.isWindows) return;
+    await _plugin.cancelAll();
+  }
 }

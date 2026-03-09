@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'app_keys.dart';
+import 'providers/timer_provider.dart';
 import 'screens/home_screen.dart';
+import 'services/background_timer.dart';
 import 'services/notification_service.dart';
 import 'services/tray_service.dart';
 
@@ -26,9 +28,16 @@ void main() async {
         await windowManager.focus();
       },
     );
+    await NotificationService.instance.initialize();
+  } else {
+    // Android / iOS: initialize background service first, then notifications
+    // with the background-isolate handler from background_timer.dart
+    await initBackgroundService();
+    await NotificationService.instance.initialize(
+      backgroundHandler: onNotificationActionBackground,
+    );
   }
 
-  await NotificationService.instance.initialize();
   runApp(const ProviderScope(child: TimerDoctorApp()));
 }
 
@@ -39,13 +48,34 @@ class TimerDoctorApp extends StatefulWidget {
   State<TimerDoctorApp> createState() => _TimerDoctorAppState();
 }
 
-class _TimerDoctorAppState extends State<TimerDoctorApp> {
+class _TimerDoctorAppState extends State<TimerDoctorApp>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    // Initialize tray after Flutter rendering engine is ready
     if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
       TrayService.instance.initialize();
+    }
+    if (Platform.isAndroid || Platform.isIOS) {
+      WidgetsBinding.instance.addObserver(this);
+    }
+  }
+
+  @override
+  void dispose() {
+    if (Platform.isAndroid || Platform.isIOS) {
+      WidgetsBinding.instance.removeObserver(this);
+    }
+    super.dispose();
+  }
+
+  // Check for notification actions that arrived while app was killed
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    if (lifecycleState == AppLifecycleState.resumed && mounted) {
+      ProviderScope.containerOf(context, listen: false)
+          .read(timerProvider.notifier)
+          .checkPendingAction();
     }
   }
 
