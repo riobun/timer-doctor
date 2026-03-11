@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:isolate';
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
@@ -13,9 +12,6 @@ const _kFgChannelId = 'timer_foreground';
 const _kFgChannelName = '计时器服务';
 const _kFgNotifId = 888;
 
-/// IsolateNameServer 中注册的端口名，用于跨 isolate 传递通知按钮事件
-const _kActionPortName = 'timer_doctor_action_port';
-
 // ── Top-level functions (required by flutter_background_service) ─────────────
 
 /// Main background service entry point. Runs the countdown timer,
@@ -24,61 +20,33 @@ const _kActionPortName = 'timer_doctor_action_port';
 Future<void> onServiceStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
-  // 注册端口，让 onNotificationActionBackground 可以跨 isolate 发送 action
-  IsolateNameServer.removePortNameMapping(_kActionPortName);
-  final receivePort = ReceivePort();
-  IsolateNameServer.registerPortWithName(receivePort.sendPort, _kActionPortName);
-
-  // Initialize flutter_local_notifications in this isolate
-  final plugin = FlutterLocalNotificationsPlugin();
-  await plugin.initialize(
-    InitializationSettings(
-      android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
-      iOS: DarwinInitializationSettings(
-        notificationCategories: [
-          DarwinNotificationCategory('timer_category', actions: [
-            DarwinNotificationAction.plain(kActionStop, '停止'),
-            DarwinNotificationAction.plain(kActionStartNow, '立刻开始'),
-            DarwinNotificationAction.plain(kActionSnooze, '稍后'),
-          ]),
-        ],
-      ),
-    ),
-    onDidReceiveBackgroundNotificationResponse: onNotificationActionBackground,
-  );
-
   // ── State ──────────────────────────────────────────────────────────────────
   int remainingSeconds = 0;
   int intervalSeconds = 25 * 60;
   int snoozeMinutes = 5;
+  bool isSnoozed = false;
   Timer? ticker;
-
-  String _fmt(int s) {
+  String fmt(int s) {
     final m = s ~/ 60;
     final sec = s % 60;
     return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
   }
 
-  Future<void> showCompleteNotification() async {
-    final androidDetails = AndroidNotificationDetails(
-      kChannelId,
-      kChannelName,
-      importance: Importance.max,
-      priority: Priority.high,
-      fullScreenIntent: true,
-      actions: [
-        const AndroidNotificationAction(kActionStop, '停止'),
-        const AndroidNotificationAction(kActionStartNow, '立刻开始'),
-        AndroidNotificationAction(kActionSnooze, '$snoozeMinutes分后'),
-      ],
-    );
-    await plugin.show(
-      1,
-      '⏰ 时间到！',
-      '休息一下，或者继续专注？',
-      NotificationDetails(android: androidDetails),
-    );
-  }
+  // Forward declaration so actionPoller can reference handleAction.
+  late void Function(String) handleAction;
+
+  // ── 独立轮询 Timer：服务生命周期内持续运行，每秒检查通知按钮的待处理 action ──
+  // 倒计时结束后 ticker 会被 cancel，但 actionPoller 继续运行，
+  // 确保通知弹出后用户点击按钮依然有效。
+  Timer.periodic(const Duration(seconds: 1), (_) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload(); // 刷新内存缓存，获取其他 Engine 写入的最新值
+    final pending = prefs.getString('pending_action');
+    if (pending != null && pending.isNotEmpty) {
+      await prefs.remove('pending_action');
+      handleAction(pending);
+    }
+  });
 
   void startCountdown(int seconds) {
     ticker?.cancel();
@@ -91,7 +59,7 @@ Future<void> onServiceStart(ServiceInstance service) async {
         if (service is AndroidServiceInstance) {
           service.setForegroundNotificationInfo(
             title: 'Timer Doctor',
-            content: '专注中  ${_fmt(remainingSeconds)}',
+            content: '${isSnoozed ? '休息中' : '专注中'}  ${fmt(remainingSeconds)}',
           );
         }
       }
@@ -99,79 +67,94 @@ Future<void> onServiceStart(ServiceInstance service) async {
       if (remainingSeconds <= 0) {
         ticker?.cancel();
         ticker = null;
-        service.invoke('complete', {});
-        await showCompleteNotification();
+        if (isSnoozed) {
+          // 休息结束：自动开始下一轮工作计时，通知 engine#1 展示简单提醒。
+          isSnoozed = false;
+          startCountdown(intervalSeconds);
+          service.invoke('complete', {'snoozeMinutes': snoozeMinutes, 'wasSnoozed': true});
+        } else {
+          // 工作计时结束：通知 engine#1 展示带操作按钮的通知。
+          service.invoke('complete', {'snoozeMinutes': snoozeMinutes, 'wasSnoozed': false});
+        }
       }
     });
   }
 
-  void handleAction(String actionId) {
+  handleAction = (String actionId) {
     switch (actionId) {
       case kActionStop:
         ticker?.cancel();
         service.invoke('ui_stop', {});
-        receivePort.close();
-        IsolateNameServer.removePortNameMapping(_kActionPortName);
         service.stopSelf();
         break;
       case kActionStartNow:
+        isSnoozed = false;
         startCountdown(intervalSeconds);
         service.invoke('ui_start_now', {});
         break;
       case kActionSnooze:
+        isSnoozed = true;
         startCountdown(snoozeMinutes * 60);
         service.invoke('ui_snooze', {});
         break;
     }
-  }
+  };
 
-  // 接收来自 onNotificationActionBackground 的跨 isolate 消息
-  receivePort.listen((message) {
-    if (message is String) handleAction(message);
-  });
-
-  // ── Listen for commands from main isolate ──────────────────────────────────
+  // ── 先注册所有事件监听器，再初始化 plugin ──────────────────────────────────
+  // 必须在 plugin.initialize() 之前注册，否则主线程 invoke('start') 到达时
+  // 监听器还未就绪，事件会被静默丢弃，导致倒计时延迟 10 秒才启动。
 
   service.on('start').listen((data) {
     if (data == null) return;
     intervalSeconds = (data['intervalSeconds'] as num).toInt();
     snoozeMinutes = (data['snoozeMinutes'] as num).toInt();
+    isSnoozed = false;
     startCountdown(intervalSeconds);
+  });
+
+  // 前台通知按钮点击：NotificationService 通过 invoke('action') 直接发过来
+  service.on('action').listen((data) {
+    if (data == null) return;
+    final actionId = data['id'] as String? ?? '';
+    if (actionId.isNotEmpty) handleAction(actionId);
   });
 
   service.on('stop').listen((_) {
     ticker?.cancel();
-    receivePort.close();
-    IsolateNameServer.removePortNameMapping(_kActionPortName);
     service.stopSelf();
   });
+
+  // 所有监听器注册完毕，通知主线程可以安全发送 'start'
+  service.invoke('ready', {});
 
   // UI 重新进入前台时查询当前状态
   service.on('get_state').listen((_) {
     service.invoke('state', {
       'remaining': remainingSeconds,
       'running': ticker != null,
+      'isSnoozed': isSnoozed,
     });
   });
+
+  // engine #2 不再调用 plugin.initialize()。
+  // 原因：flutter_background_service_android 在 engine #2 里抛异常，
+  // 可能导致 flutter_local_notifications 注册不完整，反而干扰 engine #1
+  // 的通知回调处理。通知由 engine #1 负责展示和响应。
 }
 
 /// Called when user taps a notification action while the app is in background.
-/// Uses IsolateNameServer to forward the action to the running background service.
-/// Falls back to SharedPreferences if the service is not running.
+/// Stores the action in SharedPreferences; the running background service
+/// will pick it up on the next tick (within 1 second).
+///
+/// ⚠️ 必须先初始化插件注册表，否则 SharedPreferences 的 Platform Channel
+/// 不可用，setString 会静默失败，action 就此丢失。
 @pragma('vm:entry-point')
 void onNotificationActionBackground(NotificationResponse response) async {
+  WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+
   final actionId = response.actionId ?? '';
   if (actionId.isEmpty) return;
-
-  // 优先通过 IsolateNameServer 转发给后台服务 isolate
-  final port = IsolateNameServer.lookupPortByName(_kActionPortName);
-  if (port != null) {
-    port.send(actionId);
-    return;
-  }
-
-  // 后台服务不在运行（App 被杀死），存入 SharedPreferences 等 App 恢复时处理
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('pending_action', actionId);
 }
@@ -180,7 +163,6 @@ void onNotificationActionBackground(NotificationResponse response) async {
 @pragma('vm:entry-point')
 Future<bool> onIosBackground(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
-  DartPluginRegistrant.ensureInitialized();
   return true;
 }
 
@@ -201,7 +183,6 @@ Future<void> initBackgroundService() async {
           importance: Importance.low,
         ),
       );
-  // kChannelId（计时结束渠道）由 NotificationService.initialize() 在插件初始化后管理
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(

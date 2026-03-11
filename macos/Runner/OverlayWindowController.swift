@@ -162,12 +162,20 @@ class OverlayWindowController: NSObject {
     let textY = (h - textH) / 2
 
     if isMarquee {
-      tf.frame = NSRect(x: 0, y: textY, width: textW, height: textH)
+      // Place text just outside the right edge; animation slides it leftward
+      tf.frame = NSRect(x: panelW, y: textY, width: textW, height: textH)
 
-      let anim = CABasicAnimation(keyPath: "transform.translation.x")
-      anim.fromValue = panelW
-      anim.toValue = -textW
-      anim.duration = Double(panelW + textW) / 60.0
+      // Clip label to the pill so text doesn't overflow on either side
+      bv.layer?.masksToBounds = true
+
+      // Speed: 60 pt/s feels natural; minimum 4 s for short overflows
+      let distance = panelW + textW
+      let duration = max(4.0, Double(distance) / 60.0)
+
+      let anim = CABasicAnimation(keyPath: "position.x")
+      anim.fromValue = panelW + textW / 2        // leading edge just off right
+      anim.toValue   = -(textW / 2)              // trailing edge just off left
+      anim.duration  = duration
       anim.repeatCount = .infinity
       anim.timingFunction = CAMediaTimingFunction(name: .linear)
       tf.layer?.add(anim, forKey: "marquee")

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/timer_state.dart';
+import '../services/ios_timer_service.dart';
 import '../services/notification_service.dart';
 import '../services/sound_service.dart';
 import '../services/timer_service.dart';
@@ -14,10 +15,8 @@ import '../services/tray_service.dart';
 
 class TimerNotifier extends StateNotifier<TimerState> {
   TimerNotifier() : super(const TimerState()) {
-    if (!_isMobile) {
-      TimerService.instance.onNotificationAction = _handleNotificationAction;
-    }
     if (_isDesktop) {
+      TimerService.instance.onNotificationAction = _handleNotificationAction;
       TrayService.instance.onAction = _handleTrayAction;
     }
     _loadConfig();
@@ -27,6 +26,8 @@ class TimerNotifier extends StateNotifier<TimerState> {
   StreamSubscription<TimerEventData>? _subscription;
   final List<StreamSubscription> _mobileSubscriptions = [];
 
+  bool get _isIOS => Platform.isIOS;
+  bool get _isAndroid => Platform.isAndroid;
   bool get _isMobile => Platform.isAndroid || Platform.isIOS;
   bool get _isDesktop =>
       Platform.isMacOS || Platform.isWindows || Platform.isLinux;
@@ -49,7 +50,9 @@ class TimerNotifier extends StateNotifier<TimerState> {
   }
 
   void _subscribeToEvents() {
-    if (_isMobile) {
+    if (_isIOS) {
+      _subscribeIos();
+    } else if (_isAndroid) {
       _subscribeMobile();
     } else {
       _subscription = TimerService.instance.events.listen((event) {
@@ -81,9 +84,10 @@ class TimerNotifier extends StateNotifier<TimerState> {
       if (!mounted || data == null) return;
       final remaining = (data['remaining'] as num).toInt();
       final running = data['running'] as bool? ?? false;
+      final isSnoozed = data['isSnoozed'] as bool? ?? false;
       if (running && remaining > 0) {
         state = state.copyWith(
-          status: TimerStatus.running,
+          status: isSnoozed ? TimerStatus.snoozed : TimerStatus.running,
           remainingSeconds: remaining,
         );
       }
@@ -101,11 +105,31 @@ class TimerNotifier extends StateNotifier<TimerState> {
           remainingSeconds: (data['remaining'] as num).toInt());
     }));
 
-    // Timer finished (background service already showed the notification)
-    _mobileSubscriptions.add(svc.on('complete').listen((_) {
+    // 倒计时结束：engine #2 通知我们，由 engine #1（主线程）展示通知。
+    // engine #2 里 flutter_local_notifications 注册不稳定，不可在那边 show()。
+    _mobileSubscriptions.add(svc.on('complete').listen((data) {
       if (!mounted) return;
-      SoundService.instance.playAlert();
-      state = state.copyWith(status: TimerStatus.idle, remainingSeconds: 0);
+      final wasSnoozed = data?['wasSnoozed'] as bool? ?? false;
+      if (wasSnoozed) {
+        // 休息结束，engine#2 已自动重启工作计时，只展示简单提醒、不计周期。
+        SoundService.instance.playSnoozeAlert();
+        NotificationService.instance.showSnoozeEnd();
+        state = state.copyWith(
+          status: TimerStatus.running,
+          remainingSeconds: state.config.intervalMinutes * 60,
+        );
+      } else {
+        // 工作计时自然结束，计入一个完成的周期。
+        SoundService.instance.playWorkAlert();
+        final snoozeMinutes =
+            (data?['snoozeMinutes'] as num?)?.toInt() ?? state.config.snoozeMinutes;
+        NotificationService.instance.showTimerComplete(snoozeMinutes);
+        state = state.copyWith(
+          status: TimerStatus.idle,
+          remainingSeconds: 0,
+          cycleCount: state.cycleCount + 1,
+        );
+      }
     }));
 
     // Notification action: user tapped "停止计时"
@@ -120,7 +144,6 @@ class TimerNotifier extends StateNotifier<TimerState> {
       if (!mounted) return;
       state = state.copyWith(
         status: TimerStatus.running,
-        cycleCount: state.cycleCount + 1,
         remainingSeconds: state.config.intervalMinutes * 60,
       );
     }));
@@ -130,20 +153,53 @@ class TimerNotifier extends StateNotifier<TimerState> {
       if (!mounted) return;
       state = state.copyWith(
         status: TimerStatus.snoozed,
-        cycleCount: state.cycleCount + 1,
         remainingSeconds: state.config.snoozeMinutes * 60,
       );
     }));
   }
 
+  void _subscribeIos() {
+    _subscription = IosTimerService.instance.events.listen((event) {
+      if (!mounted) return;
+      if (event.event == TimerEvent.tick) {
+        state = state.copyWith(remainingSeconds: event.remainingSeconds);
+      } else if (event.event == TimerEvent.complete) {
+        final wasSnoozed = event.wasSnoozed ?? false;
+        if (wasSnoozed) {
+          // Snooze ended in foreground — IosTimerService auto-started work timer.
+          SoundService.instance.playSnoozeAlert();
+          NotificationService.instance.showSnoozeEnd();
+          state = state.copyWith(
+            status: TimerStatus.running,
+            remainingSeconds: state.config.intervalMinutes * 60,
+          );
+        } else {
+          SoundService.instance.playWorkAlert();
+          NotificationService.instance
+              .showTimerComplete(state.config.snoozeMinutes);
+          state = state.copyWith(
+            status: TimerStatus.idle,
+            remainingSeconds: 0,
+            cycleCount: state.cycleCount + 1,
+          );
+        }
+      }
+    });
+  }
+
   void _onTimerComplete() {
-    SoundService.instance.playAlert();
     if (state.isSnoozed) {
+      SoundService.instance.playSnoozeAlert();
       NotificationService.instance.showSnoozeEnd();
       _doStart();
     } else {
+      SoundService.instance.playWorkAlert();
       NotificationService.instance.showTimerComplete(state.config.snoozeMinutes);
-      state = state.copyWith(status: TimerStatus.idle, remainingSeconds: 0);
+      state = state.copyWith(
+        status: TimerStatus.idle,
+        remainingSeconds: 0,
+        cycleCount: state.cycleCount + 1,
+      );
       if (_isDesktop) {
         TrayService.instance.setTitle(null);
         TrayService.instance.updateStatus(isRunning: false);
@@ -160,16 +216,35 @@ class TimerNotifier extends StateNotifier<TimerState> {
     );
   }
 
-  void startTimer() {
-    if (_isMobile) {
+  Future<void> startTimer() async {
+    if (_isIOS) {
+      final seconds = state.config.intervalMinutes * 60;
+      IosTimerService.instance.startWork(seconds, state.config.snoozeMinutes);
+      state = state.copyWith(
+        status: TimerStatus.running,
+        remainingSeconds: seconds,
+      );
+    } else if (_isAndroid) {
       final seconds = state.config.intervalMinutes * 60;
       final svc = FlutterBackgroundService();
-      svc.startService().then((_) {
+      final alreadyRunning = await svc.isRunning();
+      if (alreadyRunning) {
         svc.invoke('start', {
           'intervalSeconds': seconds,
           'snoozeMinutes': state.config.snoozeMinutes,
         });
-      });
+      } else {
+        // 等 background isolate 注册好监听器再发 start，避免事件被静默丢弃
+        StreamSubscription? readySub;
+        readySub = svc.on('ready').listen((_) {
+          readySub?.cancel();
+          svc.invoke('start', {
+            'intervalSeconds': seconds,
+            'snoozeMinutes': state.config.snoozeMinutes,
+          });
+        });
+        await svc.startService();
+      }
       state = state.copyWith(
         status: TimerStatus.running,
         remainingSeconds: seconds,
@@ -186,12 +261,15 @@ class TimerNotifier extends StateNotifier<TimerState> {
   }
 
   void stopTimer() {
-    if (_isMobile) {
+    if (_isIOS) {
+      IosTimerService.instance.stop();
+    } else if (_isAndroid) {
       FlutterBackgroundService().invoke('stop', {});
+      NotificationService.instance.cancelAll();
     } else {
       TimerService.instance.stop();
+      NotificationService.instance.cancelAll();
     }
-    NotificationService.instance.cancelAll();
     state = state.copyWith(
       status: TimerStatus.idle,
       remainingSeconds: 0,
@@ -209,7 +287,6 @@ class TimerNotifier extends StateNotifier<TimerState> {
         stopTimer();
         break;
       case kActionStartNow:
-        state = state.copyWith(cycleCount: state.cycleCount + 1);
         startTimer();
         break;
       case kActionSnooze:
@@ -230,20 +307,26 @@ class TimerNotifier extends StateNotifier<TimerState> {
   }
 
   void _startSnooze() {
-    final seconds = state.config.snoozeMinutes * 60;
-    if (_isMobile) {
+    final snoozeSeconds = state.config.snoozeMinutes * 60;
+    final intervalSeconds = state.config.intervalMinutes * 60;
+    if (_isIOS) {
+      IosTimerService.instance.startSnooze(
+        snoozeSeconds,
+        intervalSeconds,
+        state.config.snoozeMinutes,
+      );
+    } else if (_isAndroid) {
       final svc = FlutterBackgroundService();
       svc.invoke('start', {
-        'intervalSeconds': seconds,
+        'intervalSeconds': snoozeSeconds,
         'snoozeMinutes': state.config.snoozeMinutes,
       });
     } else {
-      TimerService.instance.start(seconds);
+      TimerService.instance.start(snoozeSeconds);
     }
     state = state.copyWith(
       status: TimerStatus.snoozed,
-      remainingSeconds: seconds,
-      cycleCount: state.cycleCount + 1,
+      remainingSeconds: snoozeSeconds,
     );
     if (_isDesktop) {
       TrayService.instance.updateStatus(
@@ -263,7 +346,34 @@ class TimerNotifier extends StateNotifier<TimerState> {
   Future<void> checkPendingAction() async {
     if (!_isMobile) return;
 
-    // 同步后台服务当前状态
+    if (_isIOS) {
+      // Cancel any pre-scheduled notifications (handled in-app now).
+      await IosTimerService.instance.cancelScheduledNotifications();
+
+      // Sync timer state from saved end time.
+      final (:isRunning, :remaining, :wasSnoozed) =
+          await IosTimerService.instance.syncFromBackground();
+
+      if (!mounted) return;
+
+      if (isRunning) {
+        state = state.copyWith(
+          status: wasSnoozed ? TimerStatus.snoozed : TimerStatus.running,
+          remainingSeconds: remaining,
+        );
+      }
+
+      // Handle any notification action tapped while app was in background.
+      final prefs = await SharedPreferences.getInstance();
+      final action = prefs.getString('pending_action');
+      if (action != null && action.isNotEmpty) {
+        await prefs.remove('pending_action');
+        _handleNotificationAction(action, null);
+      }
+      return;
+    }
+
+    // Android: sync with background service.
     final svc = FlutterBackgroundService();
     if (await svc.isRunning()) {
       svc.invoke('get_state', {});
@@ -278,13 +388,20 @@ class TimerNotifier extends StateNotifier<TimerState> {
     }
   }
 
+  /// Schedule background notifications for the current iOS timer state.
+  /// Called when the app is about to go to background.
+  Future<void> scheduleIosNotifications() async {
+    if (!_isIOS) return;
+    await IosTimerService.instance.scheduleNotificationsForBackground();
+  }
+
   @override
   void dispose() {
     _subscription?.cancel();
     for (final sub in _mobileSubscriptions) {
       sub.cancel();
     }
-    if (!_isMobile) {
+    if (_isDesktop) {
       TimerService.instance.onNotificationAction = null;
     }
     super.dispose();

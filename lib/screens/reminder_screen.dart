@@ -118,7 +118,9 @@ class _ReminderScreenState extends ConsumerState<ReminderScreen> {
                                 ? '开启后，文字悬浮在所有窗口之上\n可拖动到屏幕任意位置'
                                 : Platform.isAndroid
                                     ? '开启后，文字将悬浮在其他应用上方\n首次使用需授予悬浮窗权限'
-                                    : '当前平台暂不支持系统级悬浮窗',
+                                    : Platform.isIOS
+                                        ? '开启后以画中画模式显示\n可悬浮在其他应用上方，可拖动位置'
+                                        : '当前平台暂不支持系统级悬浮窗',
                             style:
                                 Theme.of(context).textTheme.bodySmall?.copyWith(
                                       color: colorScheme.onSurfaceVariant,

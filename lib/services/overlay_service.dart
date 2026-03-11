@@ -6,7 +6,7 @@ class OverlayService {
   static const _channel = MethodChannel('timer_doctor/overlay');
 
   static bool get _supported =>
-      Platform.isMacOS || Platform.isWindows || Platform.isAndroid;
+      Platform.isMacOS || Platform.isWindows || Platform.isAndroid || Platform.isIOS;
 
   static Future<void> show(String text) async {
     if (!_supported) return;

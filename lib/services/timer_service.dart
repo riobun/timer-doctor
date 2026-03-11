@@ -5,8 +5,11 @@ enum TimerEvent { tick, complete }
 class TimerEventData {
   final TimerEvent event;
   final int remainingSeconds;
+  final bool? wasSnoozed;
+  final int? snoozeMinutes;
 
-  TimerEventData(this.event, this.remainingSeconds);
+  TimerEventData(this.event, this.remainingSeconds,
+      {this.wasSnoozed, this.snoozeMinutes});
 }
 
 class TimerService {

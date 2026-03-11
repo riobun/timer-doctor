@@ -1,7 +1,10 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:timezone/data/latest_all.dart' as tz_data;
+import 'package:timezone/timezone.dart' as tz;
 import 'package:window_manager/window_manager.dart';
 
 import 'app_keys.dart';
@@ -29,10 +32,28 @@ void main() async {
       },
     );
     await NotificationService.instance.initialize();
-  } else {
-    // Android / iOS: initialize background service first, then notifications
-    // with the background-isolate handler from background_timer.dart
+  } else if (Platform.isAndroid) {
+    // Android: initialize background service first, then notifications.
     await initBackgroundService();
+    await NotificationService.instance.initialize(
+      backgroundHandler: onNotificationActionBackground,
+    );
+
+    // 请求豁免电池优化，防止 MIUI 等国产 ROM 节流后台服务
+    const channel = MethodChannel('com.example.timer_doctor/battery');
+    try {
+      await channel.invokeMethod('requestIgnoreBatteryOptimizations');
+    } catch (_) {}
+  } else if (Platform.isIOS) {
+    // iOS: initialize timezone + notifications.
+    // No background service — we use pre-scheduled local notifications instead.
+    tz_data.initializeTimeZones();
+    try {
+      final timezoneName = DateTime.now().timeZoneName;
+      tz.setLocalLocation(tz.getLocation(timezoneName));
+    } catch (_) {
+      // 降级：使用 UTC（通知时间可能有偏差）
+    }
     await NotificationService.instance.initialize(
       backgroundHandler: onNotificationActionBackground,
     );
@@ -69,13 +90,19 @@ class _TimerDoctorAppState extends State<TimerDoctorApp>
     super.dispose();
   }
 
-  // Check for notification actions that arrived while app was killed
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
-    if (lifecycleState == AppLifecycleState.resumed && mounted) {
-      ProviderScope.containerOf(context, listen: false)
-          .read(timerProvider.notifier)
-          .checkPendingAction();
+    if (!mounted) return;
+    final notifier =
+        ProviderScope.containerOf(context, listen: false).read(timerProvider.notifier);
+
+    if (lifecycleState == AppLifecycleState.resumed) {
+      // Handle notification actions and sync timer state.
+      notifier.checkPendingAction();
+    } else if (lifecycleState == AppLifecycleState.paused &&
+        Platform.isIOS) {
+      // iOS going to background: pre-schedule local notifications.
+      notifier.scheduleIosNotifications();
     }
   }
 

@@ -1,8 +1,15 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:local_notifier/local_notifier.dart';
+import 'package:timezone/timezone.dart' as tz;
 import 'timer_service.dart';
+
+// Native channel for Android timer-complete notification (bypasses
+// flutter_local_notifications action-button broadcast issues).
+const _androidNotifChannel = MethodChannel('timer_doctor/notification');
 
 const kChannelId = 'timer_doctor_channel';
 const kChannelName = 'Timer Notifications';
@@ -12,6 +19,8 @@ const kActionStartNow = 'action_start_now';
 const kActionSnooze = 'action_snooze';
 
 /// Top-level function required by flutter_local_notifications for background handling.
+/// On mobile this is never actually reached — onNotificationActionBackground in
+/// background_timer.dart is used instead. Kept as a safety fallback.
 @pragma('vm:entry-point')
 void notificationTapBackground(NotificationResponse response) {
   TimerService.instance.handleNotificationAction(
@@ -45,9 +54,8 @@ class NotificationService {
         DarwinNotificationCategory(
           'timer_category',
           actions: [
-            DarwinNotificationAction.plain(kActionStop, '停止计时'),
             DarwinNotificationAction.plain(kActionStartNow, '立刻开始'),
-            DarwinNotificationAction.plain(kActionSnooze, '稍后开始'),
+            DarwinNotificationAction.plain(kActionSnooze, '稍后休息'),
           ],
         ),
       ],
@@ -64,10 +72,18 @@ class NotificationService {
         linux: linuxSettings,
       ),
       onDidReceiveNotificationResponse: (response) {
-        TimerService.instance.handleNotificationAction(
-          response.actionId ?? '',
-          response.payload,
-        );
+        final actionId = response.actionId ?? '';
+        if (actionId.isEmpty) return;
+        if (Platform.isAndroid || Platform.isIOS) {
+          // 前台时直接通过 flutter_background_service 事件通道发给后台服务，可靠且即时。
+          // 后台/被杀场景走 onNotificationActionBackground → SharedPreferences fallback。
+          FlutterBackgroundService().invoke('action', {'id': actionId});
+        } else {
+          TimerService.instance.handleNotificationAction(
+            actionId,
+            response.payload,
+          );
+        }
       },
       onDidReceiveBackgroundNotificationResponse:
           backgroundHandler ?? notificationTapBackground,
@@ -116,20 +132,28 @@ class NotificationService {
 
   /// Shows the "time's up" notification with 3 action buttons.
   Future<void> showTimerComplete(int snoozeMinutes) async {
+    // Android: use native notification so action button broadcasts are
+    // delivered via TimerActionReceiver → SharedPreferences → actionPoller.
+    if (Platform.isAndroid) {
+      await _androidNotifChannel.invokeMethod(
+        'showTimerComplete',
+        {'snoozeMinutes': snoozeMinutes},
+      );
+      return;
+    }
+
     if (Platform.isWindows) {
       final notification = LocalNotification(
         title: '⏰ 时间到！',
         body: '休息一下，或者继续专注？',
         actions: [
-          LocalNotificationAction(text: '停止计时'),
           LocalNotificationAction(text: '立刻开始'),
-          LocalNotificationAction(text: '等 $snoozeMinutes 分钟'),
+          LocalNotificationAction(text: '休息 $snoozeMinutes 分钟'),
         ],
       );
       notification.onClickAction = (actionIndex) {
         final actionId = switch (actionIndex) {
-          0 => kActionStop,
-          1 => kActionStartNow,
+          0 => kActionStartNow,
           _ => kActionSnooze,
         };
         TimerService.instance.handleNotificationAction(actionId, null);
@@ -145,14 +169,15 @@ class NotificationService {
       priority: Priority.high,
       fullScreenIntent: true,
       actions: [
-        const AndroidNotificationAction(kActionStop, '停止计时'),
         const AndroidNotificationAction(kActionStartNow, '立刻开始'),
-        AndroidNotificationAction(kActionSnooze, '等 $snoozeMinutes 分钟'),
+        AndroidNotificationAction(kActionSnooze, '休息 $snoozeMinutes 分钟'),
       ],
     );
 
     const darwinDetails = DarwinNotificationDetails(
       categoryIdentifier: 'timer_category',
+      presentAlert: true,
+      presentSound: true,
     );
 
     await _plugin.show(
@@ -189,13 +214,67 @@ class NotificationService {
           priority: Priority.defaultPriority,
         ),
         macOS: DarwinNotificationDetails(),
-        iOS: DarwinNotificationDetails(),
+        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
       ),
     );
   }
 
+  // ── iOS scheduled notifications ───────────────────────────────────────────
+
+  /// Schedule a work-complete notification at [fireAt] (iOS only).
+  Future<void> scheduleTimerComplete(DateTime fireAt, int snoozeMinutes) async {
+    if (!Platform.isIOS) return;
+    await _plugin.zonedSchedule(
+      1,
+      '⏰ 时间到！',
+      '休息一下，或者继续专注？',
+      tz.TZDateTime.from(fireAt, tz.local),
+      const NotificationDetails(
+        iOS: DarwinNotificationDetails(
+          categoryIdentifier: 'timer_category',
+          presentAlert: true,
+          presentSound: true,
+        ),
+      ),
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+    );
+  }
+
+  /// Schedule a simple snooze-end notification at [fireAt] (iOS only).
+  Future<void> scheduleSnoozeEnd(DateTime fireAt) async {
+    if (!Platform.isIOS) return;
+    await _plugin.zonedSchedule(
+      2,
+      '🎯 开始专注！',
+      '休息结束，新一轮专注已开始',
+      tz.TZDateTime.from(fireAt, tz.local),
+      const NotificationDetails(
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentSound: true,
+        ),
+      ),
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+    );
+  }
+
+  /// Cancel only the scheduled iOS notifications (IDs 1 and 2).
+  Future<void> cancelScheduled() async {
+    if (!Platform.isIOS) return;
+    await _plugin.cancel(1);
+    await _plugin.cancel(2);
+  }
+
   Future<void> cancelAll() async {
     if (Platform.isWindows) return;
+    if (Platform.isAndroid) {
+      try {
+        await _androidNotifChannel.invokeMethod('cancelTimerNotification');
+      } catch (_) {}
+      return;
+    }
     await _plugin.cancelAll();
   }
 }

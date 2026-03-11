@@ -6,12 +6,14 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Foreground service permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Request battery optimization exemption (prevents MIUI/EMUI from throttling background service) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Allow the service to restart after device reboot (optional) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
-        android:label="timer_doctor"
+        android:label="@string/app_name"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -34,15 +36,18 @@
         </activity>
 
         <!-- Background service for timer countdown -->
+        <!-- mediaPlayback type bypasses Android 12+ 10-second foreground notification delay -->
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
-            android:foregroundServiceType="specialUse"
+            android:foregroundServiceType="mediaPlayback"
             android:exported="false"
-            tools:replace="android:exported">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Countdown timer running in background" />
-        </service>
+            tools:replace="android:exported" />
+
+
+        <!-- Receives notification action button taps, writes to SharedPreferences -->
+        <receiver
+            android:name=".TimerActionReceiver"
+            android:exported="false" />
 
         <meta-data
             android:name="flutterEmbedding"
