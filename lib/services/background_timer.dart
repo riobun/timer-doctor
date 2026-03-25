@@ -154,9 +154,11 @@ void onNotificationActionBackground(NotificationResponse response) async {
   DartPluginRegistrant.ensureInitialized();
 
   final actionId = response.actionId ?? '';
+  debugPrint('[Notif] onNotificationActionBackground: actionId=$actionId');
   if (actionId.isEmpty) return;
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString('pending_action', actionId);
+  debugPrint('[Notif] onNotificationActionBackground: saved pending_action=$actionId');
 }
 
 /// iOS background handler — keeps service alive briefly.

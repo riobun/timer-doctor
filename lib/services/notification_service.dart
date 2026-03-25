@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -34,6 +35,9 @@ class NotificationService {
   static final NotificationService instance = NotificationService._();
 
   final _plugin = FlutterLocalNotificationsPlugin();
+
+  /// iOS: called when the user taps an action button while the app is in foreground.
+  void Function(String actionId, String? payload)? onIosAction;
 
   Future<void> initialize({
     DidReceiveBackgroundNotificationResponseCallback? backgroundHandler,
@@ -73,11 +77,16 @@ class NotificationService {
       ),
       onDidReceiveNotificationResponse: (response) {
         final actionId = response.actionId ?? '';
+        debugPrint('[Notif] onDidReceiveNotificationResponse: actionId=$actionId notifId=${response.id}');
         if (actionId.isEmpty) return;
-        if (Platform.isAndroid || Platform.isIOS) {
+        if (Platform.isAndroid) {
           // 前台时直接通过 flutter_background_service 事件通道发给后台服务，可靠且即时。
           // 后台/被杀场景走 onNotificationActionBackground → SharedPreferences fallback。
           FlutterBackgroundService().invoke('action', {'id': actionId});
+        } else if (Platform.isIOS) {
+          // iOS 没有后台服务，直接回调给 TimerNotifier。
+          debugPrint('[Notif] iOS action: onIosAction=${onIosAction != null ? "set" : "NULL"}');
+          onIosAction?.call(actionId, response.payload);
         } else {
           TimerService.instance.handleNotificationAction(
             actionId,

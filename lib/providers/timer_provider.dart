@@ -6,6 +6,8 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/timer_state.dart';
 import '../services/ios_timer_service.dart';
 import '../services/notification_service.dart';
@@ -18,6 +20,10 @@ class TimerNotifier extends StateNotifier<TimerState> {
     if (_isDesktop) {
       TimerService.instance.onNotificationAction = _handleNotificationAction;
       TrayService.instance.onAction = _handleTrayAction;
+    }
+    if (Platform.isIOS) {
+      NotificationService.instance.onIosAction = _handleNotificationAction;
+      debugPrint('[TimerProvider] onIosAction callback registered');
     }
     _loadConfig();
     _subscribeToEvents();
@@ -282,6 +288,7 @@ class TimerNotifier extends StateNotifier<TimerState> {
   }
 
   void _handleNotificationAction(String actionId, String? payload) {
+    debugPrint('[TimerProvider] _handleNotificationAction: actionId=$actionId');
     switch (actionId) {
       case kActionStop:
         stopTimer();
@@ -292,6 +299,8 @@ class TimerNotifier extends StateNotifier<TimerState> {
       case kActionSnooze:
         _startSnooze();
         break;
+      default:
+        debugPrint('[TimerProvider] _handleNotificationAction: unknown actionId=$actionId');
     }
   }
 
@@ -347,12 +356,14 @@ class TimerNotifier extends StateNotifier<TimerState> {
     if (!_isMobile) return;
 
     if (_isIOS) {
+      debugPrint('[TimerProvider] checkPendingAction: iOS resumed');
       // Cancel any pre-scheduled notifications (handled in-app now).
       await IosTimerService.instance.cancelScheduledNotifications();
 
       // Sync timer state from saved end time.
       final (:isRunning, :remaining, :wasSnoozed) =
           await IosTimerService.instance.syncFromBackground();
+      debugPrint('[TimerProvider] syncFromBackground: isRunning=$isRunning remaining=$remaining wasSnoozed=$wasSnoozed');
 
       if (!mounted) return;
 
@@ -366,6 +377,7 @@ class TimerNotifier extends StateNotifier<TimerState> {
       // Handle any notification action tapped while app was in background.
       final prefs = await SharedPreferences.getInstance();
       final action = prefs.getString('pending_action');
+      debugPrint('[TimerProvider] checkPendingAction: pending_action=$action');
       if (action != null && action.isNotEmpty) {
         await prefs.remove('pending_action');
         _handleNotificationAction(action, null);
@@ -403,6 +415,9 @@ class TimerNotifier extends StateNotifier<TimerState> {
     }
     if (_isDesktop) {
       TimerService.instance.onNotificationAction = null;
+    }
+    if (Platform.isIOS) {
+      NotificationService.instance.onIosAction = null;
     }
     super.dispose();
   }

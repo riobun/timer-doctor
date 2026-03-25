@@ -13,7 +13,7 @@ import UIKit
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
-    let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PipOverlayPlugin")
+    guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PipOverlayPlugin") else { return }
     let channel = FlutterMethodChannel(
       name: "timer_doctor/overlay",
       binaryMessenger: registrar.messenger()
@@ -31,13 +31,13 @@ import UIKit
       switch call.method {
       case "show":
         pip.show(text: args["text"] as? String ?? "")
-        result(nil)
+        result(nil as Any?)
       case "hide":
         pip.hide()
-        result(nil)
+        result(nil as Any?)
       case "updateText":
         pip.updateText(args["text"] as? String ?? "")
-        result(nil)
+        result(nil as Any?)
       case "updateStyle":
         pip.updateStyle(
           fontSize: args["fontSize"] as? Double ?? 14,
@@ -45,7 +45,7 @@ import UIKit
           bgColorArgb: args["bgColor"] as? Int ?? 0xFF141414,
           bgOpacity: args["bgOpacity"] as? Double ?? 0.85
         )
-        result(nil)
+        result(nil as Any?)
       case "checkPermission":
         result(true)  // PiP needs no special permission
       default:
